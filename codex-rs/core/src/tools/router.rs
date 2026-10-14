@@ -82,28 +82,10 @@ impl ToolCall {
     }
 }
 
-/// Whether collaboration task messages (`spawn_agent` / `send_message` / `followup_task`) may
-/// be delivered to a child as plaintext when the provider does not supply the upstream
-/// `encrypted_function_args: []` marker.
-///
-/// Opt-in via the `CODEX_PLAINTEXT_COLLABORATION_MESSAGES` environment variable (any value
-/// other than empty / `0` / `false` / `no`). This is a deployment-level assertion that the
-/// configured model provider does not use encrypted function arguments — true for every
-/// non-OpenAI Responses endpoint — so the collaboration payload is already plain text and can
-/// be handed to the child verbatim. It deliberately does not decrypt anything: a call that
-/// does carry ciphertext stays on the encrypted path.
-pub(crate) fn plaintext_collaboration_messages_enabled() -> bool {
-    use std::sync::OnceLock;
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("CODEX_PLAINTEXT_COLLABORATION_MESSAGES")
-            .map(|value| {
-                let value = value.trim().to_ascii_lowercase();
-                !(value.is_empty() || value == "0" || value == "false" || value == "no")
-            })
-            .unwrap_or(false)
-    })
-}
+// The plaintext-collaboration opt-in lives in the protocol crate (it also decides the model
+// item type, see `InterAgentCommunication::to_model_input_item`); re-exported here so the
+// tool-side call sites stay unchanged.
+pub(crate) use codex_protocol::protocol::plaintext_collaboration_messages_enabled;
 
 pub(crate) fn tool_log_payload<'a>(
     payload: &'a ToolPayload,

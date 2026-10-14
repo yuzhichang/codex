@@ -926,6 +926,29 @@ pub struct InterAgentCommunication {
     pub trigger_turn: bool,
 }
 
+/// Whether a plaintext collaboration task message may be delivered to a child as an ordinary,
+/// provider-neutral `message`/`user` item.
+///
+/// Opt-in via the `CODEX_PLAINTEXT_COLLABORATION_MESSAGES` environment variable (any value
+/// other than empty / `0` / `false` / `no`). Codex delivers inter-agent tasks as its own
+/// `agent_message` response item, a first-party OpenAI Responses type that a third-party
+/// Responses endpoint ignores — so the child never sees its assignment (openai/codex#34833,
+/// #36376, #46939). With this enabled, and only when the message is already plaintext, the
+/// task is sent as a standard `message` item with role `user` instead. Encrypted messages are
+/// unaffected.
+pub fn plaintext_collaboration_messages_enabled() -> bool {
+    use std::sync::OnceLock;
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("CODEX_PLAINTEXT_COLLABORATION_MESSAGES")
+            .map(|value| {
+                let value = value.trim().to_ascii_lowercase();
+                !(value.is_empty() || value == "0" || value == "false" || value == "no")
+            })
+            .unwrap_or(false)
+    })
+}
+
 impl InterAgentCommunication {
     pub fn new(
         author: AgentPath,
@@ -988,6 +1011,24 @@ impl InterAgentCommunication {
     }
 
     pub fn to_model_input_item(&self) -> ResponseItem {
+        // Plaintext delivery on an opted-in (non-OpenAI) provider: `agent_message` is a
+        // first-party Responses item type that a third-party endpoint ignores, so hand the
+        // task to the child as a standard user message instead.
+        if self.encrypted_content.is_none() && plaintext_collaboration_messages_enabled() {
+            return ResponseItem::Message {
+                encrypted_content: None,
+                status: None,
+                id: self.id.clone(),
+                role: "user".to_string(),
+                content: vec![ContentItem::InputText {
+                    text: self.content.clone(),
+                }],
+                phase: None,
+                internal_chat_message_metadata_passthrough: self
+                    .internal_chat_message_metadata_passthrough
+                    .clone(),
+            };
+        }
         let content = match &self.encrypted_content {
             Some(encrypted_content) => {
                 let message_type = if self.trigger_turn {
