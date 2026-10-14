@@ -54,21 +54,55 @@ pub struct ToolCall {
 
 impl ToolCall {
     pub(crate) fn direct_source(&self) -> ToolCallSource {
-        if self.tool_name.namespace.as_deref() == Some("collaboration")
+        // Upstream selects the plaintext collaboration path only when the function call
+        // carries an explicit empty `encrypted_function_args` marker, which only OpenAI's
+        // Responses backend emits. A third-party Responses provider never emits the field,
+        // so the marker is absent (`None`) and the sub-agent task is wrapped as
+        // `encrypted_content` the child model cannot read (openai/codex#34833, #36376,
+        // #46939). With CODEX_PLAINTEXT_COLLABORATION_MESSAGES the absent marker is treated
+        // as plaintext too. Real ciphertext (`Some(non-empty)`) is never downgraded.
+        let is_collaboration_message = self.tool_name.namespace.as_deref() == Some("collaboration")
             && matches!(
                 self.tool_name.name.as_str(),
                 "spawn_agent" | "send_message" | "followup_task"
-            )
-            && self
-                .encrypted_function_args
-                .as_ref()
-                .is_some_and(Vec::is_empty)
+            );
+        let upstream_plaintext_marker = self
+            .encrypted_function_args
+            .as_ref()
+            .is_some_and(Vec::is_empty);
+        let absent_marker = self.encrypted_function_args.is_none();
+        if is_collaboration_message
+            && (upstream_plaintext_marker
+                || (absent_marker && plaintext_collaboration_messages_enabled()))
         {
             ToolCallSource::DirectPlaintextMessage
         } else {
             ToolCallSource::Direct
         }
     }
+}
+
+/// Whether collaboration task messages (`spawn_agent` / `send_message` / `followup_task`) may
+/// be delivered to a child as plaintext when the provider does not supply the upstream
+/// `encrypted_function_args: []` marker.
+///
+/// Opt-in via the `CODEX_PLAINTEXT_COLLABORATION_MESSAGES` environment variable (any value
+/// other than empty / `0` / `false` / `no`). This is a deployment-level assertion that the
+/// configured model provider does not use encrypted function arguments — true for every
+/// non-OpenAI Responses endpoint — so the collaboration payload is already plain text and can
+/// be handed to the child verbatim. It deliberately does not decrypt anything: a call that
+/// does carry ciphertext stays on the encrypted path.
+pub(crate) fn plaintext_collaboration_messages_enabled() -> bool {
+    use std::sync::OnceLock;
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("CODEX_PLAINTEXT_COLLABORATION_MESSAGES")
+            .map(|value| {
+                let value = value.trim().to_ascii_lowercase();
+                !(value.is_empty() || value == "0" || value == "false" || value == "no")
+            })
+            .unwrap_or(false)
+    })
 }
 
 pub(crate) fn tool_log_payload<'a>(

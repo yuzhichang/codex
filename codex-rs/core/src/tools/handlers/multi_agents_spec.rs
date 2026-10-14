@@ -23,6 +23,23 @@ const SPAWN_AGENT_MODEL_OVERRIDE_DESCRIPTION: &str =
     "Model override for the new agent. Omit unless an explicit override is needed.";
 const MAX_REASONING_EFFORT_CHARS_IN_SPAWN_AGENT_DESCRIPTION: usize = 64;
 
+/// Applies the upstream `encrypted` annotation to a collaboration `message` field unless the
+/// operator opted into plaintext collaboration delivery.
+///
+/// The annotation tells the backend to treat the argument as encrypted; a third-party
+/// Responses provider cannot round-trip it, so the child would receive an unreadable
+/// `encrypted_content` payload (openai/codex#34833, #46939). With
+/// `CODEX_PLAINTEXT_COLLABORATION_MESSAGES` the annotation is dropped and the provider returns
+/// the already-plain-text message, which `router::direct_source` then routes onto the existing
+/// plaintext path. See `router::plaintext_collaboration_messages_enabled`.
+fn collaboration_message_schema(schema: JsonSchema) -> JsonSchema {
+    if crate::tools::router::plaintext_collaboration_messages_enabled() {
+        schema
+    } else {
+        schema.with_encrypted()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct SpawnAgentToolOptions {
     pub available_models: Vec<ModelPreset>,
@@ -211,10 +228,9 @@ pub fn create_send_message_tool() -> ToolSpec {
         ),
         (
             "message".to_string(),
-            JsonSchema::string(Some(
+            collaboration_message_schema(JsonSchema::string(Some(
                 "Message text to queue on the target agent.".to_string(),
-            ))
-            .with_encrypted(),
+            ))),
         ),
     ]);
 
@@ -244,10 +260,9 @@ pub fn create_followup_task_tool() -> ToolSpec {
         ),
         (
             "message".to_string(),
-            JsonSchema::string(Some(
+            collaboration_message_schema(JsonSchema::string(Some(
                 "Message text to send to the target agent.".to_string(),
-            ))
-            .with_encrypted(),
+            ))),
         ),
     ]);
 
@@ -650,10 +665,9 @@ fn spawn_agent_common_properties_v2(agent_type_description: &str) -> BTreeMap<St
     BTreeMap::from([
         (
             "message".to_string(),
-            JsonSchema::string(Some(
+            collaboration_message_schema(JsonSchema::string(Some(
                 "Initial plain-text task for the new agent.".to_string(),
-            ))
-            .with_encrypted(),
+            ))),
         ),
         (
             "agent_type".to_string(),
