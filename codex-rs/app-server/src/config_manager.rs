@@ -2,6 +2,7 @@ use codex_app_server_protocol::ModelProviderError;
 use codex_arg0::Arg0DispatchPaths;
 use codex_cloud_config::managed_config_bundle_loader;
 use codex_config::CloudConfigBundleLoader;
+use codex_config::ConfigLayerSource;
 use codex_config::ConfigLayerStack;
 use codex_config::LoaderOverrides;
 use codex_config::ThreadConfigLoader;
@@ -436,6 +437,13 @@ impl ConfigManager {
         current: &Config,
     ) -> std::io::Result<()> {
         self.check_thread_model_provider(current).await?;
+        // A thread whose provider came from an explicit per-thread selection is exempt from
+        // the file-default drift check below, because its provider is legitimately not the
+        // default. Hosts that multiplex several providers in one app-server pass a provider
+        // per thread; comparing against `config.toml` would reject every one of them.
+        if selected_provider_explicitly(&current.config_layer_stack) {
+            return Ok(());
+        }
         let configured = self
             .load_latest_config(Some(current.cwd.to_path_buf()))
             .await?;
@@ -594,11 +602,15 @@ impl ConfigManager {
                     }
                 }
                 let current_provider = current_provider?;
+                // Same exemption as `check_thread_model_provider_for_input`: an explicit
+                // per-thread provider selection is authoritative, so it is not required to
+                // match whatever provider the configuration files currently select.
+                let selected_explicitly = selected_provider_explicitly(layers);
                 for provider in [
                     saved_provider.unwrap_or(requested_provider),
                     requested_provider,
                 ] {
-                    if provider != current_provider {
+                    if provider != current_provider && !selected_explicitly {
                         return Err(std::io::Error::new(
                             std::io::ErrorKind::InvalidInput,
                             ModelProviderError::ModelProviderMismatch {
@@ -701,7 +713,7 @@ impl ConfigManager {
                 )
             })?);
         }
-        let merged_cli_overrides = cli_overrides
+        let mut merged_cli_overrides = cli_overrides
             .iter()
             .cloned()
             .chain(
@@ -710,6 +722,17 @@ impl ConfigManager {
                     .map(|(key, value)| (key, json_to_toml(value))),
             )
             .collect::<Vec<_>>();
+        // A provider selection from the caller (thread/start's `modelProvider`) is applied as
+        // a harness override, which sets the value without leaving provenance in the layer
+        // stack. Record it as a session flag too, so a later provider-drift check can tell
+        // "this thread chose its provider" from "it inherited the file default". The value is
+        // identical to the harness override, so layering the same key changes nothing.
+        if let Some(provider) = typesafe_overrides.model_provider.as_ref() {
+            merged_cli_overrides.push((
+                "model_provider".to_string(),
+                TomlValue::String(provider.clone()),
+            ));
+        }
         let result = codex_core::config::ConfigBuilder::default()
             .codex_home(self.codex_home.clone())
             .cli_overrides(merged_cli_overrides)
@@ -848,6 +871,23 @@ pub(crate) fn protected_feature_keys(config_layer_stack: &ConfigLayerStack) -> B
     }
 
     protected_features
+}
+
+/// Whether this thread's provider was selected explicitly rather than inherited from the
+/// configuration files.
+///
+/// An explicit selection — a per-thread provider from an app-server client, or the process's
+/// own `-c` override — lands in the `SessionFlags` layer. Such a thread legitimately runs on a
+/// provider that is not the file default, so the drift checks below must not compare it
+/// against `config.toml`: a host that multiplexes providers passes one per thread (RAGFlow and
+/// other app-server clients do) and every one of those threads would be rejected. Threads that
+/// inherited the default keep the check, which is what it is for: a user who edits
+/// `model_provider` mid-thread must not silently continue on a different inference route.
+fn selected_provider_explicitly(layers: &ConfigLayerStack) -> bool {
+    layers
+        .layers_high_to_low()
+        .filter(|layer| matches!(layer.name, ConfigLayerSource::SessionFlags))
+        .any(|layer| layer.config.get("model_provider").is_some())
 }
 
 pub(crate) fn apply_runtime_feature_enablement(

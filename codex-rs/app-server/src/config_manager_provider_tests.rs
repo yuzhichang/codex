@@ -305,6 +305,15 @@ name = "Gateway"
         .await?;
     let default_manager =
         ConfigManager::without_managed_config_for_tests(home.path().to_path_buf());
+    if key == "model_provider" {
+        // An invocation-level provider is an explicit selection, so the file default is not
+        // the authority for this thread: input stays admissible rather than being reported as
+        // drift. A host that passes one provider per thread depends on this.
+        default_manager
+            .check_thread_model_provider_for_input(&current)
+            .await?;
+        return Ok(());
+    }
     let error = default_manager
         .check_thread_model_provider_for_input(&current)
         .await
@@ -316,6 +325,81 @@ name = "Gateway"
         Some(&ModelProviderError::ModelProviderMismatch {
             model_provider: "gateway".into(),
             current_model_provider: "openai".into(),
+        })
+    );
+    Ok(())
+}
+
+/// A host that multiplexes providers passes one per thread (the app-server folds it into the
+/// `SessionFlags` layer). That thread legitimately runs on a provider that is not the file
+/// default, so input must be admitted instead of rejected as drift.
+#[tokio::test]
+async fn explicit_thread_provider_is_not_checked_against_the_file_default() -> Result<()> {
+    let home = tempdir()?;
+    std::fs::write(
+        home.path().join("config.toml"),
+        "model_provider = 'workbuddy'\n[model_providers.workbuddy]\nname = 'Workbuddy'\n",
+    )?;
+    let manager = ConfigManager::without_managed_config_for_tests(home.path().to_path_buf());
+
+    let request_overrides = HashMap::from([(
+        "model_providers.minimax".to_string(),
+        serde_json::json!({
+            "name": "minimax",
+            "base_url": "https://api.minimaxi.test",
+            "wire_api": "responses",
+        }),
+    )]);
+    let config = manager
+        .load_for_cwd(
+            Some(request_overrides),
+            ConfigOverrides {
+                // The shape app-server clients use: a provider per thread.
+                model_provider: Some("minimax".to_string()),
+                ..ConfigOverrides::default()
+            },
+            /*cwd*/ None,
+        )
+        .await?;
+
+    assert_eq!(config.model_provider_id, "minimax");
+    assert!(selected_provider_explicitly(&config.config_layer_stack));
+    manager
+        .check_thread_model_provider_for_input(&config)
+        .await?;
+    Ok(())
+}
+
+/// Without the explicit selection the drift check still fires, which is what a CLI user
+/// editing `model_provider` mid-thread relies on.
+#[tokio::test]
+async fn inherited_thread_provider_still_rejects_drift() -> Result<()> {
+    let home = tempdir()?;
+    std::fs::write(
+        home.path().join("config.toml"),
+        "model_provider = 'workbuddy'\n[model_providers.workbuddy]\nname = 'Workbuddy'\n",
+    )?;
+    let manager = ConfigManager::without_managed_config_for_tests(home.path().to_path_buf());
+    let config = manager
+        .load_latest_config(Some(home.path().to_path_buf()))
+        .await?;
+
+    assert!(!selected_provider_explicitly(&config.config_layer_stack));
+    std::fs::write(
+        home.path().join("config.toml"),
+        "model_provider = 'other'\n[model_providers.other]\nname = 'Other'\n[model_providers.workbuddy]\nname = 'Workbuddy'\n",
+    )?;
+    let error = manager
+        .check_thread_model_provider_for_input(&config)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error
+            .get_ref()
+            .and_then(|error| error.downcast_ref::<ModelProviderError>()),
+        Some(&ModelProviderError::ModelProviderMismatch {
+            model_provider: "workbuddy".into(),
+            current_model_provider: "other".into(),
         })
     );
     Ok(())
