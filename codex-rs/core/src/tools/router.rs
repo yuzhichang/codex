@@ -17,6 +17,7 @@ use crate::tools::registry::ToolExposure;
 use crate::tools::registry::ToolRegistry;
 #[cfg(test)]
 use crate::tools::spec_plan::finalize_tool_router;
+use codex_features::MultiAgentMessageDelivery;
 use codex_otel::SessionTelemetry;
 use codex_otel::TOOL_REGISTRATIONS_METRIC;
 use codex_otel::TOOL_REGISTRATIONS_METRIC_BUCKETS;
@@ -53,17 +54,28 @@ pub struct ToolCall {
 }
 
 impl ToolCall {
-    pub(crate) fn direct_source(&self) -> ToolCallSource {
-        if self.tool_name.namespace.as_deref() == Some("collaboration")
+    /// Classifies a collaboration call as plaintext or encrypted delivery.
+    ///
+    /// Upstream selects the plaintext path only for an explicit empty
+    /// `encrypted_function_args` marker, which is a backend-supplied signal. A third-party
+    /// Responses provider never emits the field at all, so a deployment that configures
+    /// `features.multi_agent_v2.message_delivery = "plaintext"` treats the ABSENT marker as
+    /// plaintext for the three collaboration message tools. Real ciphertext
+    /// (`Some(non-empty)`) is never downgraded, and the upstream `Some([])` marker keeps
+    /// working unchanged.
+    pub(crate) fn direct_source(&self, message_delivery: MultiAgentMessageDelivery) -> ToolCallSource {
+        let is_collaboration_message = self.tool_name.namespace.as_deref() == Some("collaboration")
             && matches!(
                 self.tool_name.name.as_str(),
                 "spawn_agent" | "send_message" | "followup_task"
-            )
-            && self
-                .encrypted_function_args
-                .as_ref()
-                .is_some_and(Vec::is_empty)
-        {
+            );
+        let backend_plaintext_marker = self
+            .encrypted_function_args
+            .as_ref()
+            .is_some_and(Vec::is_empty);
+        let configured_plaintext = message_delivery == MultiAgentMessageDelivery::Plaintext
+            && self.encrypted_function_args.is_none();
+        if is_collaboration_message && (backend_plaintext_marker || configured_plaintext) {
             ToolCallSource::DirectPlaintextMessage
         } else {
             ToolCallSource::Direct

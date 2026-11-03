@@ -25,6 +25,7 @@ use codex_protocol::dynamic_tools::DynamicToolNamespaceSpec;
 use codex_protocol::dynamic_tools::DynamicToolNamespaceTool;
 use codex_protocol::dynamic_tools::DynamicToolSpec;
 use codex_protocol::models::ContentItem;
+use codex_features::MultiAgentMessageDelivery;
 use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::ResponseItem;
 use codex_tools::ResponsesApiNamespace;
@@ -57,6 +58,75 @@ fn tool_log_payload_redacts_plaintext_multi_agent_messages() {
         tool_log_payload(&payload, &ToolCallSource::Direct),
         payload.log_payload()
     );
+}
+
+fn collaboration_call(
+    tool: &str,
+    encrypted_function_args: Option<Vec<String>>,
+) -> ToolCall {
+    ToolCall {
+        tool_name: ToolName::namespaced("collaboration", tool),
+        call_id: "call-1".to_string(),
+        payload: ToolPayload::Function {
+            arguments: json!({}).to_string(),
+        },
+        encrypted_function_args,
+    }
+}
+
+/// A third-party Responses provider never emits `encrypted_function_args`, so the upstream
+/// `Some([])` marker is absent and plaintext delivery would be unreachable. Configuring
+/// `message_delivery = "plaintext"` makes the absent marker select the plaintext path
+/// (openai/codex#34833, #36376, #46939).
+#[test]
+fn plaintext_policy_routes_absent_marker_to_plaintext() {
+    for tool in ["spawn_agent", "send_message", "followup_task"] {
+        assert_eq!(
+            collaboration_call(tool, /*encrypted_function_args*/ None)
+                .direct_source(MultiAgentMessageDelivery::Plaintext),
+            ToolCallSource::DirectPlaintextMessage,
+            "{tool} should be plaintext under the plaintext policy"
+        );
+    }
+}
+
+/// The plaintext policy must not change behavior for anyone who leaves the default in place.
+#[test]
+fn encrypted_policy_keeps_absent_marker_encrypted() {
+    for tool in ["spawn_agent", "send_message", "followup_task"] {
+        assert_eq!(
+            collaboration_call(tool, /*encrypted_function_args*/ None)
+                .direct_source(MultiAgentMessageDelivery::Encrypted),
+            ToolCallSource::Direct,
+            "{tool} must stay encrypted by default"
+        );
+    }
+}
+
+/// Real ciphertext is never downgraded, whatever the policy says.
+#[test]
+fn ciphertext_is_never_downgraded_by_plaintext_policy() {
+    for tool in ["spawn_agent", "send_message", "followup_task"] {
+        assert_eq!(
+            collaboration_call(tool, Some(vec!["gAAAA-ciphertext".to_string()]))
+                .direct_source(MultiAgentMessageDelivery::Plaintext),
+            ToolCallSource::Direct,
+            "{tool} carries ciphertext and must stay encrypted"
+        );
+    }
+}
+
+/// The policy only covers collaboration message tools; other tools keep their source.
+#[test]
+fn plaintext_policy_does_not_affect_other_collaboration_tools() {
+    for tool in ["wait_agent", "list_agents", "interrupt_agent"] {
+        assert_eq!(
+            collaboration_call(tool, /*encrypted_function_args*/ None)
+                .direct_source(MultiAgentMessageDelivery::Plaintext),
+            ToolCallSource::Direct,
+            "{tool} carries no task payload"
+        );
+    }
 }
 
 impl codex_extension_api::ToolContributor for ExtensionEchoContributor {
@@ -230,7 +300,10 @@ async fn build_tool_call_uses_namespace_for_registry_name() -> anyhow::Result<()
     );
     assert_eq!(call.call_id, "call-namespace");
     assert_eq!(call.encrypted_function_args, Some(Vec::new()));
-    assert_eq!(call.direct_source(), ToolCallSource::Direct);
+    assert_eq!(
+        call.direct_source(Default::default()),
+        ToolCallSource::Direct
+    );
     match call.payload {
         ToolPayload::Function { arguments } => {
             assert_eq!(arguments, "{}");

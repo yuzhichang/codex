@@ -298,6 +298,23 @@ impl FeatureConfig for GuardianV3ConfigToml {
     }
 }
 
+/// How a multi-agent V2 collaboration task reaches the child's model.
+///
+/// Codex delivers the task as an `agent_message` response item, a first-party OpenAI Responses
+/// type. Only OpenAI's backend renders it; a third-party Responses endpoint ignores the item, so
+/// the child never sees its assignment (openai/codex#34833, #36376, #46939).
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, Default, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum MultiAgentMessageDelivery {
+    /// Send the payload as encrypted content, unchanged upstream behavior.
+    #[default]
+    Encrypted,
+    /// Send the task as an ordinary plaintext `message`/`user` item, the shape every
+    /// Responses-compatible provider understands. Delivery is already plaintext on a
+    /// non-OpenAI backend, so nothing is decrypted and nothing is lost from the rollout.
+    Plaintext,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct MultiAgentV2ConfigToml {
@@ -359,6 +376,12 @@ pub struct MultiAgentV2ConfigToml {
     pub message_board_remote: Option<RemoteMessageBoardConfigToml>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub non_code_mode_only: Option<bool>,
+    /// How collaboration task messages reach the child's model. Defaults to `encrypted`.
+    ///
+    /// Set to `plaintext` when the child runs on a provider that does not render Codex's
+    /// first-party `agent_message` item. See [`MultiAgentMessageDelivery`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message_delivery: Option<MultiAgentMessageDelivery>,
 }
 
 impl FeatureConfig for MultiAgentV2ConfigToml {

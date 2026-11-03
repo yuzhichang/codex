@@ -6,7 +6,15 @@ use crate::agent::types::MessageDeliveryMode;
 use crate::tools::handlers::multi_agents_spec::create_followup_task_tool;
 use codex_tools::ToolSpec;
 
-pub(crate) struct Handler;
+pub(crate) struct Handler {
+    message_delivery: codex_features::MultiAgentMessageDelivery,
+}
+
+impl Handler {
+    pub(crate) fn new(message_delivery: codex_features::MultiAgentMessageDelivery) -> Self {
+        Self { message_delivery }
+    }
+}
 
 impl ToolExecutor<ToolInvocation> for Handler {
     fn tool_name(&self) -> ToolName {
@@ -14,7 +22,7 @@ impl ToolExecutor<ToolInvocation> for Handler {
     }
 
     fn spec(&self) -> ToolSpec {
-        create_followup_task_tool()
+        create_followup_task_tool(self.message_delivery)
     }
 
     fn handle<'a>(&'a self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'a>

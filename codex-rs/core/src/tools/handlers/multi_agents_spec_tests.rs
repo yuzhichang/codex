@@ -245,7 +245,7 @@ fn send_message_tool_requires_message_and_has_no_output_schema() {
         parameters,
         output_schema,
         ..
-    }) = create_send_message_tool()
+    }) = create_send_message_tool(Default::default())
     else {
         panic!("send_message should be a function tool");
     };
@@ -288,7 +288,7 @@ fn followup_task_tool_requires_message_and_has_no_output_schema() {
         parameters,
         output_schema,
         ..
-    }) = create_followup_task_tool()
+    }) = create_followup_task_tool(Default::default())
     else {
         panic!("followup_task should be a function tool");
     };
@@ -414,4 +414,57 @@ fn list_agents_tool_status_schema_includes_interrupted() {
             "not_found"
         ])
     );
+}
+
+/// A third-party Responses provider cannot produce the encrypted argument form, so the
+/// plaintext policy must drop the annotation on every collaboration message parameter.
+/// Otherwise the provider either returns opaque text or the child receives an unreadable
+/// `encrypted_content` (openai/codex#34833, #36376, #46939).
+#[test]
+fn plaintext_delivery_drops_the_encrypted_annotation() {
+    let encrypted_annotation = |tool: ToolSpec| -> Option<bool> {
+        let ToolSpec::Function(ResponsesApiTool { parameters, .. }) = tool else {
+            panic!("collaboration tools should be function tools");
+        };
+        parameters
+            .properties
+            .expect("object params")
+            .get("message")
+            .and_then(|schema| schema.encrypted)
+    };
+
+    for delivery in [
+        MultiAgentMessageDelivery::Encrypted,
+        MultiAgentMessageDelivery::Plaintext,
+    ] {
+        let spawn = create_spawn_agent_tool_v2(
+            SpawnAgentToolOptions {
+                agent_type_description: "role help".to_string(),
+                expose_agent_type: true,
+                expose_spawn_agent_model_overrides: false,
+                message_delivery: delivery,
+                ..SpawnAgentToolOptions::default()
+            },
+            /*description_override*/ None,
+        );
+        let expected = match delivery {
+            MultiAgentMessageDelivery::Encrypted => Some(true),
+            MultiAgentMessageDelivery::Plaintext => None,
+        };
+        assert_eq!(
+            encrypted_annotation(spawn),
+            expected,
+            "spawn_agent under {delivery:?}"
+        );
+        assert_eq!(
+            encrypted_annotation(create_send_message_tool(delivery)),
+            expected,
+            "send_message under {delivery:?}"
+        );
+        assert_eq!(
+            encrypted_annotation(create_followup_task_tool(delivery)),
+            expected,
+            "followup_task under {delivery:?}"
+        );
+    }
 }

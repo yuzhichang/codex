@@ -74,6 +74,7 @@ use codex_features::FeatureOverrides;
 use codex_features::FeatureToml;
 use codex_features::Features;
 use codex_features::FeaturesToml;
+use codex_features::MultiAgentMessageDelivery;
 use codex_features::MultiAgentV2ConfigToml;
 use codex_features::NetworkProxyConfigToml;
 use codex_features::SleepToolMode;
@@ -1407,6 +1408,10 @@ pub struct MultiAgentV2Config {
     pub message_board_in_memory: bool,
     pub message_board_remote: Option<codex_features::RemoteMessageBoardConfigToml>,
     pub non_code_mode_only: bool,
+    /// How collaboration task messages reach the child's model. `Encrypted` is upstream's
+    /// behavior; `Plaintext` hands the task over as an ordinary user message so a provider
+    /// that does not render `agent_message` still sees the assignment.
+    pub message_delivery: MultiAgentMessageDelivery,
 }
 
 impl MultiAgentV2Config {
@@ -1431,6 +1436,7 @@ impl MultiAgentV2Config {
             message_board_in_memory: false,
             message_board_remote: None,
             non_code_mode_only: true,
+            message_delivery: MultiAgentMessageDelivery::default(),
         }
     }
 }
@@ -2936,6 +2942,9 @@ fn resolve_multi_agent_v2_config(config_toml: &ConfigToml) -> MultiAgentV2Config
     let non_code_mode_only = base
         .and_then(|config| config.non_code_mode_only)
         .unwrap_or(default.non_code_mode_only);
+    let message_delivery = base
+        .and_then(|config| config.message_delivery)
+        .unwrap_or(default.message_delivery);
 
     MultiAgentV2Config {
         max_concurrent_threads_per_session,
@@ -2957,6 +2966,7 @@ fn resolve_multi_agent_v2_config(config_toml: &ConfigToml) -> MultiAgentV2Config
         message_board_in_memory,
         message_board_remote: base.and_then(|config| config.message_board_remote.clone()),
         non_code_mode_only,
+        message_delivery,
     }
 }
 

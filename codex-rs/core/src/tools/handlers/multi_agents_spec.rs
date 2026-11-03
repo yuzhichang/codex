@@ -1,5 +1,6 @@
 use crate::agent::child_config::MAX_SPAWN_AGENT_MODEL_OVERRIDES;
 use crate::agent::child_config::model_supports_multi_agent_backend;
+use codex_features::MultiAgentMessageDelivery;
 use codex_protocol::openai_models::ModelPreset;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_tools::JsonSchema;
@@ -23,6 +24,27 @@ const SPAWN_AGENT_MODEL_OVERRIDE_DESCRIPTION: &str =
     "Model override for the new agent. Omit unless an explicit override is needed.";
 const MAX_REASONING_EFFORT_CHARS_IN_SPAWN_AGENT_DESCRIPTION: usize = 64;
 
+/// Applies upstream's `encrypted` annotation to a collaboration `message` field unless the
+/// deployment opted into plaintext delivery.
+///
+/// The annotation tells the backend to treat the argument as ciphertext. A third-party
+/// Responses provider cannot produce or consume that form, so it either returns an opaque
+/// payload or the child receives `encrypted_content` it cannot read
+/// (openai/codex#34833, #36376, #46939). With `message_delivery = "plaintext"` the annotation
+/// is dropped and the provider returns the plain text it already has.
+///
+/// The decision lives in config rather than an environment variable so two threads, or two
+/// providers, in one process can differ.
+fn collaboration_message_schema(
+    schema: JsonSchema,
+    message_delivery: MultiAgentMessageDelivery,
+) -> JsonSchema {
+    match message_delivery {
+        MultiAgentMessageDelivery::Encrypted => schema.with_encrypted(),
+        MultiAgentMessageDelivery::Plaintext => schema,
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct SpawnAgentToolOptions {
     pub available_models: Vec<ModelPreset>,
@@ -33,6 +55,9 @@ pub struct SpawnAgentToolOptions {
     pub multi_agent_version: MultiAgentVersion,
     pub model_catalog_in_context: bool,
     pub usage_hint_text: Option<String>,
+    /// Shape of the collaboration `message` parameter schema, mirroring the thread's
+    /// `multi_agent_v2.message_delivery`.
+    pub message_delivery: MultiAgentMessageDelivery,
 }
 
 impl Default for SpawnAgentToolOptions {
@@ -46,6 +71,7 @@ impl Default for SpawnAgentToolOptions {
             multi_agent_version: MultiAgentVersion::Disabled,
             model_catalog_in_context: false,
             usage_hint_text: None,
+            message_delivery: MultiAgentMessageDelivery::default(),
         }
     }
 }
@@ -122,7 +148,10 @@ pub fn create_spawn_agent_tool_v2(
         (options.expose_spawn_agent_model_overrides && !options.hide_agent_type_model_reasoning)
             .then_some(SPAWN_AGENT_INHERITED_MODEL_GUIDANCE)
     };
-    let mut properties = spawn_agent_common_properties_v2(&options.agent_type_description);
+    let mut properties = spawn_agent_common_properties_v2(
+        &options.agent_type_description,
+        options.message_delivery,
+    );
     if !options.expose_agent_type {
         properties.remove("agent_type");
     }
@@ -201,7 +230,7 @@ pub fn create_send_input_tool_v1() -> ToolSpec {
     })
 }
 
-pub fn create_send_message_tool() -> ToolSpec {
+pub fn create_send_message_tool(message_delivery: MultiAgentMessageDelivery) -> ToolSpec {
     let properties = BTreeMap::from([
         (
             "target".to_string(),
@@ -211,10 +240,12 @@ pub fn create_send_message_tool() -> ToolSpec {
         ),
         (
             "message".to_string(),
-            JsonSchema::string(Some(
-                "Message text to queue on the target agent.".to_string(),
-            ))
-            .with_encrypted(),
+            collaboration_message_schema(
+                JsonSchema::string(Some(
+                    "Message text to queue on the target agent.".to_string(),
+                )),
+                message_delivery,
+            ),
         ),
     ]);
 
@@ -233,7 +264,7 @@ pub fn create_send_message_tool() -> ToolSpec {
     })
 }
 
-pub fn create_followup_task_tool() -> ToolSpec {
+pub fn create_followup_task_tool(message_delivery: MultiAgentMessageDelivery) -> ToolSpec {
     let properties = BTreeMap::from([
         (
             "target".to_string(),
@@ -244,10 +275,12 @@ pub fn create_followup_task_tool() -> ToolSpec {
         ),
         (
             "message".to_string(),
-            JsonSchema::string(Some(
-                "Message text to send to the target agent.".to_string(),
-            ))
-            .with_encrypted(),
+            collaboration_message_schema(
+                JsonSchema::string(Some(
+                    "Message text to send to the target agent.".to_string(),
+                )),
+                message_delivery,
+            ),
         ),
     ]);
 
@@ -646,14 +679,19 @@ fn spawn_agent_common_properties_v1(agent_type_description: &str) -> BTreeMap<St
     ])
 }
 
-fn spawn_agent_common_properties_v2(agent_type_description: &str) -> BTreeMap<String, JsonSchema> {
+fn spawn_agent_common_properties_v2(
+    agent_type_description: &str,
+    message_delivery: MultiAgentMessageDelivery,
+) -> BTreeMap<String, JsonSchema> {
     BTreeMap::from([
         (
             "message".to_string(),
-            JsonSchema::string(Some(
-                "Initial plain-text task for the new agent.".to_string(),
-            ))
-            .with_encrypted(),
+            collaboration_message_schema(
+                JsonSchema::string(Some(
+                    "Initial plain-text task for the new agent.".to_string(),
+                )),
+                message_delivery,
+            ),
         ),
         (
             "agent_type".to_string(),
