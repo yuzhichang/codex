@@ -5,6 +5,7 @@ use crate::agent::types::MessageDeliveryMode;
 use crate::context::ContextualUserFragment;
 use crate::context::InterAgentMessage;
 use crate::context::InterAgentMessageType;
+use codex_features::MultiAgentMessageDelivery;
 use codex_protocol::AgentPath;
 use codex_protocol::protocol::InterAgentCommunication;
 
@@ -14,6 +15,7 @@ impl AgentMessage {
         author: AgentPath,
         recipient: AgentPath,
         mode: MessageDeliveryMode,
+        message_delivery: MultiAgentMessageDelivery,
     ) -> InterAgentCommunication {
         let trigger_turn = mode == MessageDeliveryMode::TriggerTurn;
         match self {
@@ -38,7 +40,22 @@ impl AgentMessage {
                 .render()
                 .into_text()
                 .unwrap_or_default();
-                InterAgentCommunication::new(author, recipient, Vec::new(), content, trigger_turn)
+                // The delivery policy is stamped onto the communication so the child's history
+                // (and any replay of it) renders the same item type it originally received.
+                match message_delivery {
+                    MultiAgentMessageDelivery::Plaintext => {
+                        InterAgentCommunication::new_portable_plaintext(
+                            author,
+                            recipient,
+                            Vec::new(),
+                            content,
+                            trigger_turn,
+                        )
+                    }
+                    MultiAgentMessageDelivery::Encrypted => {
+                        InterAgentCommunication::new(author, recipient, Vec::new(), content, trigger_turn)
+                    }
+                }
             }
         }
     }

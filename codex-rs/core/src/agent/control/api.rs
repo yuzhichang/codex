@@ -88,7 +88,12 @@ impl AgentControl for LocalAgentControl {
                             CodexErr::InvalidRequest("spawn input needs a child path".to_string())
                         })?;
                     SpawnInitialInput::InterAgentCommunication(
-                        message.into_communication(author, recipient, mode),
+                        message.into_communication(
+                            author,
+                            recipient,
+                            mode,
+                            config.multi_agent_v2.message_delivery,
+                        ),
                         AgentCommunicationContext::new(AgentCommunicationKind::Spawn, caller),
                     )
                 }
@@ -138,6 +143,9 @@ impl AgentControl for LocalAgentControl {
                             "target agent is missing an agent_path".to_string(),
                         )
                     })?;
+                    // Capture the delivery policy before `resume_config` is moved into the
+                    // optional reload below.
+                    let message_delivery = resume_config.multi_agent_v2.message_delivery;
                     // Cold-restored children still reload lazily on any message. Only
                     // locally evicted recipients can retain mail without reloading.
                     // Loaded recipients go straight to delivery, which rejects sends
@@ -151,7 +159,8 @@ impl AgentControl for LocalAgentControl {
                     } else {
                         None
                     };
-                    let communication = message.into_communication(author, receiver_path, mode);
+                    let communication =
+                        message.into_communication(author, receiver_path, mode, message_delivery);
                     let kind = match mode {
                         MessageDeliveryMode::QueueOnly => {
                             start_options.parent_turn_id = None;

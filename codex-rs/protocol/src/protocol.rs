@@ -973,6 +973,19 @@ pub struct InterAgentCommunication {
     #[ts(optional)]
     pub internal_chat_message_metadata_passthrough: Option<InternalChatMessageMetadataPassthrough>,
     pub trigger_turn: bool,
+    /// Render this task as an ordinary `message`/`user` item instead of Codex's first-party
+    /// `agent_message`.
+    ///
+    /// Recorded on the communication itself (not read from ambient config at render time) so a
+    /// rollout replayed later reproduces exactly the history the child actually saw. Only a
+    /// plaintext payload can be rendered this way; `encrypted_content` always stays on the
+    /// `agent_message` path.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub portable_plaintext: bool,
+}
+
+const fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 impl InterAgentCommunication {
@@ -992,6 +1005,21 @@ impl InterAgentCommunication {
             encrypted_content: None,
             internal_chat_message_metadata_passthrough: None,
             trigger_turn,
+            portable_plaintext: false,
+        }
+    }
+
+    /// Same as [`Self::new`] but renders the task as a portable plaintext user message.
+    pub fn new_portable_plaintext(
+        author: AgentPath,
+        recipient: AgentPath,
+        other_recipients: Vec<AgentPath>,
+        content: String,
+        trigger_turn: bool,
+    ) -> Self {
+        Self {
+            portable_plaintext: true,
+            ..Self::new(author, recipient, other_recipients, content, trigger_turn)
         }
     }
 
@@ -1011,6 +1039,7 @@ impl InterAgentCommunication {
             encrypted_content: Some(encrypted_content),
             internal_chat_message_metadata_passthrough: None,
             trigger_turn,
+            portable_plaintext: false,
         }
     }
 
@@ -1037,6 +1066,26 @@ impl InterAgentCommunication {
     }
 
     pub fn to_model_input_item(&self) -> ResponseItem {
+        // A provider that does not render Codex's first-party `agent_message` item still
+        // understands an ordinary user message, so an opted-in plaintext task is handed over in
+        // that shape. Ciphertext always keeps the `agent_message` path: there is nothing
+        // portable to render, and the marker is recorded on the communication rather than read
+        // from ambient config so a replayed rollout matches what the child actually saw.
+        if self.portable_plaintext && self.encrypted_content.is_none() {
+            return ResponseItem::Message {
+                encrypted_content: None,
+                status: None,
+                id: self.id.clone(),
+                role: "user".to_string(),
+                content: vec![ContentItem::InputText {
+                    text: self.content.clone(),
+                }],
+                phase: None,
+                internal_chat_message_metadata_passthrough: self
+                    .internal_chat_message_metadata_passthrough
+                    .clone(),
+            };
+        }
         let content = match &self.encrypted_content {
             Some(encrypted_content) => {
                 let message_type = if self.trigger_turn {
@@ -4936,6 +4985,85 @@ mod tests {
         );
     }
 
+    /// A provider that does not render Codex's first-party `agent_message` item still
+    /// understands an ordinary `message`/`user` item, so an opted-in plaintext task must be
+    /// delivered in that shape (openai/codex#34833, #36376, #46939).
+    #[test]
+    fn portable_plaintext_communication_renders_as_user_message() {
+        let communication = InterAgentCommunication::new_portable_plaintext(
+            AgentPath::root(),
+            AgentPath::root().join("worker").expect("recipient path"),
+            Vec::new(),
+            "Message Type: NEW_TASK\nPayload:\nsummarize the diff".to_string(),
+            /*trigger_turn*/ true,
+        );
+
+        assert_eq!(
+            communication.to_model_input_item(),
+            ResponseItem::Message {
+                encrypted_content: None,
+                status: None,
+                id: None,
+                role: "user".to_string(),
+                content: vec![ContentItem::InputText {
+                    text: "Message Type: NEW_TASK\nPayload:\nsummarize the diff".to_string(),
+                }],
+                phase: None,
+                internal_chat_message_metadata_passthrough: None,
+            }
+        );
+    }
+
+    /// Ciphertext has nothing portable to render, so the flag must not downgrade it: the child
+    /// would otherwise see an empty task.
+    #[test]
+    fn portable_plaintext_flag_never_unwraps_ciphertext() {
+        let mut communication = InterAgentCommunication::new_encrypted(
+            AgentPath::root(),
+            AgentPath::root().join("worker").expect("recipient path"),
+            Vec::new(),
+            "gAAAA-ciphertext".to_string(),
+            /*trigger_turn*/ true,
+        );
+        communication.portable_plaintext = true;
+
+        assert!(matches!(
+            communication.to_model_input_item(),
+            ResponseItem::AgentMessage { .. }
+        ));
+    }
+
+    /// The marker is persisted with the communication so a replayed rollout rebuilds the same
+    /// item the child originally received, instead of re-deriving it from current config.
+    #[test]
+    fn portable_plaintext_flag_round_trips_through_serde() {
+        let communication = InterAgentCommunication::new_portable_plaintext(
+            AgentPath::root(),
+            AgentPath::root().join("worker").expect("recipient path"),
+            Vec::new(),
+            "task".to_string(),
+            /*trigger_turn*/ true,
+        );
+        let serialized = serde_json::to_string(&communication).expect("serialize");
+        let restored: InterAgentCommunication =
+            serde_json::from_str(&serialized).expect("deserialize");
+        assert_eq!(restored, communication);
+
+        // Default-off keeps old rollouts readable and the wire payload unchanged.
+        let legacy = InterAgentCommunication::new(
+            AgentPath::root(),
+            AgentPath::root().join("worker").expect("recipient path"),
+            Vec::new(),
+            "task".to_string(),
+            /*trigger_turn*/ true,
+        );
+        let encoded = serde_json::to_string(&legacy).expect("serialize");
+        assert!(!encoded.contains("portable_plaintext"));
+        assert!(!serde_json::from_str::<InterAgentCommunication>(&encoded)
+            .expect("deserialize")
+            .portable_plaintext);
+    }
+
     #[test]
     fn inter_agent_communication_response_input_item_preserves_commentary_phase() {
         let mut communication = InterAgentCommunication {
@@ -4947,6 +5075,7 @@ mod tests {
             encrypted_content: None,
             internal_chat_message_metadata_passthrough: None,
             trigger_turn: true,
+            portable_plaintext: false,
         };
         communication.set_turn_id_if_missing("turn-1");
         let mut serialized_communication = communication.clone();
